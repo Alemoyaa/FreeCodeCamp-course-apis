@@ -1,100 +1,199 @@
-'use strict';
+const express = require('express')
+const app = express()
+const bodyParser = require('body-parser')
 
-var express = require('express');
-var mongoose = require('mongoose');
-var shortId = require('shortid');
-var bodyParser = require('body-parser');
-var validUrl = require('valid-url');
-var cors = require('cors');
-var app = express();
+const cors = require('cors')
 
-var port = process.env.PORT || 3000;
+const url = 'mongodb+srv://user:user@cluster0.v3sgu.mongodb.net/projects?retryWrites=true&w=majority';
 
-const url = 'mongodb+srv://user:user@cluster0.v3sgu.mongodb.net/course?retryWrites=true&w=majority';
+const mongoose = require('mongoose')
 mongoose.connect(url, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 5000
-});
-mongoose.connection.once('open', () => {
-  console.log("Connection successfully")
-});
-
-const urlShortener = mongoose.model("urlShortener", new mongoose.Schema({
-  realUrl: String,
-  shortUrl: String
-}));
-
-app.use(bodyParser.urlencoded({
-  extended: false
-}));
-app.use(cors());
-app.use(express.json());
-
-app.use('/public', express.static(process.cwd() + '/public'));
-
-app.post('/api/shorturl/new', async (req, res) => {
-
-  const url = req.body.url_input;
-  const urlCode = shortId.generate();
-
-  // Its valid the url ?
-  if (!validUrl.isWebUri(url)) {
-    res.status(401).json({
-      error: 'Invalid URL'
-    })
-  } else {
-    try {
-      // Existed in the db ?
-      let findOne = await urlShortener.findOne({
-        original_url: url
-      })
-      if (findOne) {
-        res.json({
-          original_url: findOne.original_url,
-          short_url: findOne.short_url
-        })
-      } else {
-        // Otherwise create new an return this
-        findOne = new URL({
-          original_url: url,
-          short_url: urlCode
-        })
-        await findOne.save()
-        res.json({
-          original_url: findOne.original_url,
-          short_url: findOne.short_url
-        })
-      }
-    } catch (err) {
-      console.error(err)
-      res.status(500).json('Error in server')
-    }
-  }
-})
-
-app.get('/api/shorturl/:short_url?',
-    async (req, res) => {
-      try {
-        const urlParams = await urlShortener.findOne({
-          short_url: req.params.short_url
-        })
-        if (urlParams) {
-          return res.redirect(urlParams.original_url)
-        } else {
-          return res.status(404).json('No URL found')
-        }
-      } catch (err) {
-        console.log(err)
-        res.status(500).json('Server error')
-      }
+    useCreateIndex: true,
+    useUnifiedTopology: true,
+    useNewUrlParser: true
+}).then(
+    () => {
+        console.log("Connection successfully")
+    },
+    (err) => {
+        console.log("Error: ", err)
     }
 )
+const userSchema = new mongoose.Schema({
+    username: {type: String, required: true, maxlength: 20, unique: true}
+});
+const User = mongoose.model('Users', userSchema);
 
-app.get('/', function (req, res) {
-  res.sendFile(process.cwd() + '/views/index.html');
+const logSchema = new mongoose.Schema({
+    userId: {type: String, required: true},
+    description: {type: String, required: true},
+    duration: {type: Number, required: true},
+    date: {type: Date, default: Date.now}
+});
+const Log = mongoose.model('Log', logSchema);
+
+
+app.use(cors());
+
+app.use(bodyParser.urlencoded({extended: false}));
+app.use(bodyParser.json());
+
+
+app.use(express.static('public'));
+app.get('/', (req, res) => {
+    res.sendFile(__dirname + '/views/index.html');
 });
 
-app.listen(port, function () {
-  console.log('Node.js listening in ', port + '...');
+app.get("/api/exercise/users", (req, res) => {
+    User.find({}, (err, array) => {
+        if (err) return console.error(err);
+        res.json(array);
+    })
+});
+
+app.post("/api/exercise/new-user", (req, res, next) => {
+    const newUser = new User({username: req.body.username});
+
+    newUser.save(function (err, data) {
+        if (err) {
+            if (err.code == 11000) return next({
+                status: 400,
+                message: 'username already taken'
+            });
+            return next(err);
+        }
+
+        res.json({
+            username: data.username,
+            _id: data._id
+        });
+    });
+});
+
+
+app.post("/api/exercise/add", function (req, res, next) {
+
+    User.findById(req.body.userId, 'username', {lean: true}, (err, user) => {
+
+        if (err) {
+            console.log('Error find id:', err);
+            return next(err);
+        }
+
+        const entry = {
+            userId: req.body.userId,
+            description: req.body.description,
+            duration: req.body.duration
+        };
+
+        if (req.body.date) entry.date = req.body.date;
+        const exercise = new Log(entry);
+
+        exercise.save(function (error, exercise) {
+
+            if (error) return next(error);
+
+            res.json({
+                username: user.username,
+                _id: user._id,
+                description: exercise.description,
+                duration: exercise.duration,
+                date: exercise.date.toDateString()
+            });
+        });
+    });
+});
+
+
+app.get('/api/exercise/log', (req, res, next) => {
+
+    if (!req.query.userId) return next({
+        status: 400,
+        message: 'unknown userId'
+    });
+
+    User.findById(req.query.userId, 'username', {lean: true}, (error, user) => {
+
+        if (error) {
+            console.log('Error find id:', error);
+            return next(error);
+        }
+
+        const msg = {
+            _id: user._id,
+            username: user.username
+        };
+
+        const filter = {userId: req.query.userId};
+
+        if (req.query.from) {
+            const from = new Date(req.query.from);
+            if (!isNaN(from.valueOf())) {
+                filter.date = {'$gt': from};
+                msg.from = from.toDateString();
+            }
+        }
+
+        if (req.query.to) {
+            const to = new Date(req.query.to);
+            if (!isNaN(to.valueOf())) {
+                if (!filter.date) filter.date = {};
+                filter.date['$lt'] = to;
+                msg.to = to.toDateString();
+            }
+        }
+
+        const fields = 'description duration date';
+        const options = {sort: {date: -1}};
+        const query = Log.find(filter, fields, options).lean();
+
+        if (req.query.limit) {
+            const limit = parseInt(req.query.limit);
+            if (limit) query.limit(limit);
+        }
+
+        query.exec(function (error, posts) {
+
+            if (error) return next(error);
+
+            for (let post of posts) {
+                delete post._id;
+                post.date = post.date.toDateString();
+            }
+
+            msg.count = posts.length;
+            msg.log = posts;
+            res.json(msg);
+        });
+    });
+});
+
+
+// Not found middleware
+app.use((req, res, next) => {
+    return next({status: 404, message: 'not found'});
+});
+
+// Error Handling middleware
+app.use((err, req, res, next) => {
+    let errCode, errMessage;
+
+    if (err.errors) {
+        // mongoose validation error
+        errCode = 400; // bad request
+        const keys = Object.keys(err.errors);
+        // report the first validation error
+        errMessage = err.errors[keys[0]].message;
+    } else {
+        // generic or custom error
+        errCode = err.status || 500;
+        errMessage = err.message || 'Internal Server Error';
+    }
+    res.status(errCode).type('txt')
+        .send(errMessage);
+});
+
+
+const listener = app.listen(3000, () => {
+    console.log('Your app is listening on port ' + listener.address().port);
 });
